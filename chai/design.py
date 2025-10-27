@@ -829,11 +829,11 @@ def optimize_protein_design(
             
             # Binder: no template, but can use ESM
             binder_opts = {"use_esm": use_esm, "cyclic": cyclic}
-            chains.append([best['sequence'], "B", "protein", binder_opts])
+            chains.append([best['seq'], "B", "protein", binder_opts])
         else:
             # Unconditional: no template, but can use ESM
             opts = {"use_esm": use_esm, "cyclic": cyclic}
-            chains.append([best['sequence'], "A", "protein", opts])
+            chains.append([best['seq'], "A", "protein", opts])
         
         folder.prep_inputs(chains)
         folder.get_embeddings()
