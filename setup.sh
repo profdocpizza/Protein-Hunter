@@ -101,7 +101,7 @@ fi
 # ------------------------------------------------------------------------------
 # 🔟 Make DAlphaBall.gcc executable
 # ------------------------------------------------------------------------------
-chmod +x "boltz_ph/utils/DAlphaBall.gcc" || { echo "Error: Failed to chmod DAlphaBall.gcc"; exit 1; }
+chmod +x "utils/DAlphaBall.gcc" || { echo "Error: Failed to chmod DAlphaBall.gcc"; exit 1; }
 
 # ------------------------------------------------------------------------------
 # 1️⃣1️⃣ Install Chai Lab (NEW SECTION)
