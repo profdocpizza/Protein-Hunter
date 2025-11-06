@@ -34,8 +34,6 @@ from model_utils import (
     shallow_copy_tensor_dict,
     smart_split,
 )
-# from utils.alphafold_utils import run_alphafold_step
-# from utils.pyrosetta_utils import run_rosetta_step
 
 class InputDataBuilder:
     """Handles parsing command-line arguments and constructing the base Boltz input data dictionary."""
