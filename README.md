@@ -155,9 +155,17 @@ After running AlphaFold3, the validated structures are saved in:
 `your_output_folder/03_af_pdb_success`
 
 
+## 📝 To-Do List
+
+- [ ] Add cross-validation between Boltz and Chai (both directions) without using AlphaFold3 as an option
+- [ ] Implement multi-timer support for Protein Hunter Chai edition
+- [ ] Explore other cool applications
+
+Collaboration is always welcome! Email me. Let's chat.
+
 ## 📄 License & Citation
 
-**License**: MIT License - See LICENSE file for details
+**License**: MIT License - See LICENSE file for details  
 **Citation**: If you use Protein Hunter in your research, please cite:
 ```
 @article{cho2025protein,
@@ -173,7 +181,7 @@ After running AlphaFold3, the validated structures are saved in:
 
 ## 📧 Contact & Support
 
-**Questions or Collaboration**: yehlin@mit.edu
+**Questions or Collaboration**: yehlin@mit.edu  
 **Issues**: Please report bugs and feature requests via GitHub Issues
 
 ---
