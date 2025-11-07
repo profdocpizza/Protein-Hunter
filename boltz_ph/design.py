@@ -119,7 +119,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    print(args)
     # Instantiate the main class and run the pipeline
     protein_hunter = ProteinHunter_Boltz(args)
     protein_hunter.run_pipeline()
