@@ -30,6 +30,12 @@ def parse_args():
         "--seq", type=str, default="", help="Input sequence for the binder chain (optional). If empty, sequence is randomly sampled."
     )
     sequence_group.add_argument(
+        "--sequence_suggestion",
+        type=str,
+        default="",
+        help="Input sequence suggestion for the binder chain (optional).",
+    )
+    sequence_group.add_argument(
         "--target_seq",
         type=str,
         default="",

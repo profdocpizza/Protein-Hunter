@@ -777,6 +777,7 @@ class ProteinHunter_Chai:
         self.length = args.length
         self.percent_X = args.percent_X
         self.seq = args.seq
+        self.sequence_suggestion = args.sequence_suggestion
         self.binder_chain = args.binder_chain
         self.target_seq = args.target_seq
         self.target_pdb = args.target_pdb
@@ -881,7 +882,14 @@ class ProteinHunter_Chai:
         X = []
         for t in range(self.n_trials):
             if self.seq_clean == "":
-                trial_seq = sample_seq(self.length, frac_X=self.percent_X / 100)
+                if self.sequence_suggestion:
+                    trial_seq = sample_seq(
+                        self.length,
+                        frac_X=self.percent_X / 100,
+                        sequence_suggestion=self.sequence_suggestion,
+                    )
+                else:
+                    trial_seq = sample_seq(self.length, frac_X=self.percent_X / 100)
             else:
                 trial_seq = self.seq_clean
 
