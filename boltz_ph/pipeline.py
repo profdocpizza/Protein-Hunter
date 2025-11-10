@@ -365,9 +365,17 @@ class ProteinHunter_Boltz:
             raise ValueError("Binder chain not found in data dictionary.")
 
         # Set initial binder sequence
-        initial_seq = sample_seq(
-            binder_length, exclude_P=a.exclude_P, frac_X=a.frac_X
-        )
+        if a.sequence_suggestion:
+            initial_seq = sample_seq(
+                binder_length,
+                exclude_P=a.exclude_P,
+                frac_X=a.frac_X,
+                sequence_suggestion=a.sequence_suggestion,
+            )
+        else:
+            initial_seq = sample_seq(
+                binder_length, exclude_P=a.exclude_P, frac_X=a.frac_X
+            )
         update_binder_sequence(initial_seq)
         print(f"Binder initial sequence length: {binder_length}")
 

@@ -156,13 +156,32 @@ def binder_binds_contacts(
     return contacted >= 2
 
 
-def sample_seq(length: int, exclude_P: bool = True, frac_X: float = 0.0) -> str:
+def sample_seq(
+    length: int,
+    exclude_P: bool = True,
+    frac_X: float = 0.0,
+    sequence_suggestion: Optional[str] = None,
+) -> str:
     """Samples a random sequence of the given length, optionally excluding Proline (P) and including 'X' residues."""
     aas = "ACDEFGHIKLMNQRSTVWY" + ("" if exclude_P else "P")
-    num_x = round(length * frac_X)
-    pool = aas if aas else "X"
-    seq_list = ["X"] * num_x + random.choices(pool, k=length - num_x)
-    random.shuffle(seq_list)
+    if sequence_suggestion:
+        num_x = length - len(sequence_suggestion)
+        if num_x < 0:
+            raise ValueError(
+                "Length of sequence_suggestion cannot be greater than total length."
+            )
+        x_residues = ["X"] * num_x
+        insertion_point = random.randint(0, len(x_residues))
+        seq_list = (
+            x_residues[:insertion_point]
+            + list(sequence_suggestion)
+            + x_residues[insertion_point:]
+        )
+    else:
+        num_x = round(length * frac_X)
+        pool = aas if aas else "X"
+        seq_list = ["X"] * num_x + random.choices(pool, k=length - num_x)
+        random.shuffle(seq_list)
     return "".join(seq_list)
 
 

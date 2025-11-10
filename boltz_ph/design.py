@@ -66,6 +66,12 @@ def parse_args():
     parser.add_argument("--exclude_P", action="store_true", default=False)
     parser.add_argument("--frac_X", default=0.5, type=float)
     parser.add_argument(
+        "--sequence_suggestion",
+        type=str,
+        default="",
+        help="Input sequence suggestion for the binder chain (optional).",
+    )
+    parser.add_argument(
         "--plot",
         action="store_true",
         help="Plot cycles figs per run (requires matplotlib)",
