@@ -575,25 +575,27 @@ def design_sequence(
     bias_AA="",
     temperature=0.02,
     return_logits=False,
+    batch_size=1,
+    seed=111,
 ):
     """Runs the LigandMPNN (or SolubleMPNN) sequence design wrapper."""
     seq, logits = designer.run(
         model_type=model_type,
         pdb_path=pdb_file,
-        seed=111, # Fixed seed for reproducibility per design tool
+        seed=seed, # Fixed seed for reproducibility per design tool
         chains_to_design=chains_to_design,
         bias_AA=bias_AA,
         omit_AA=omit_AA,
         return_logits=return_logits,
         extra_args={
             "--temperature": temperature,
-            "--batch_size": 1,
+            "--batch_size": batch_size,
         },
     )
     if return_logits:
         return seq, logits
 
-    return seq[0], logits
+    return seq, logits
 
 
 def plot_from_pdb(

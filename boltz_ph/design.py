@@ -1,4 +1,5 @@
 import argparse
+from ast import Store
 import os
 
 from pipeline import ProteinHunter_Boltz
@@ -12,6 +13,31 @@ def str2bool(v):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+
+def read_single_fasta(fpath):
+    """Read a FASTA file that contains exactly one sequence.
+    Returns (name, seq)."""
+    name = None
+    seq_lines = []
+    with open(fpath) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if name is not None:
+                    raise ValueError(f"FASTA {fpath} contains multiple headers!")
+                name = line[1:].strip()
+            else:
+                seq_lines.append(line)
+
+    if name is None:
+        raise ValueError(f"FASTA {fpath} contains no header.")
+    if not seq_lines:
+        raise ValueError(f"FASTA {fpath} contains no sequence lines.")
+
+    seq = "".join(seq_lines)
+    return name, seq
 
 # Keep parse_args() here for CLI functionality
 def parse_args():
@@ -111,7 +137,12 @@ def parse_args():
     parser.add_argument("--alanine_bias", action="store_true")
     parser.add_argument("--high_iptm_threshold", default=0.8, type=float)
     parser.add_argument("--high_plddt_threshold", default=0.8, type=float)
+    parser.add_argument("--high_ipsae_min_threshold", default=0.6, type=float)
+    parser.add_argument("--use_exploratory", action="store_true")
     # --- End Existing Arguments ---
+
+    # Multi-fasta mode
+    parser.add_argument("--binder_dir", help="Directory containing .fasta files to process")
 
     return parser.parse_args()
 
@@ -126,8 +157,33 @@ def main():
     args = parse_args()
     # Pretty print each argument in a row for better visualization
     print_args(args)
-    protein_hunter = ProteinHunter_Boltz(args)
-    protein_hunter.run_pipeline()
+
+    # Create output directory if needed
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    if args.binder_dir:
+        # Process each .fasta file
+        fasta_files = [f for f in os.listdir(args.binder_dir) if f.endswith(".fasta")]
+        if not fasta_files:
+            raise ValueError(f"No .fasta files found in binder_dir: {args.binder_dir}")
+
+        for fasta in fasta_files:
+            fpath = os.path.join(args.binder_dir, fasta)
+            binder_name, binder_seq = read_single_fasta(fpath)
+            # Modify args for this binder
+            args.name = binder_name
+            args.seq = binder_seq
+            args.save_dir = os.path.join(args.save_dir, binder_name)
+            os.makedirs(args.save_dir, exist_ok=True)
+            print(f"\nRunning design for binder: {binder_name}")
+            protein_hunter = ProteinHunter_Boltz(args)
+            protein_hunter.run_pipeline()
+    else:
+        # Single run mode
+        if not args.name:
+            raise ValueError("If --binder_dir is not provided, you must supply --name")
+        protein_hunter = ProteinHunter_Boltz(args)
+        protein_hunter.run_pipeline()
 
 if __name__ == "__main__":
     main()

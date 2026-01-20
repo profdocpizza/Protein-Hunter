@@ -1126,10 +1126,10 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             # Set the MSA, warn if passed in single-sequence mode
             if msa == "empty":
                 msa = -1
-                msg = (
-                    "Empty MSA found; using single sequence mode."
-                )
-                click.echo(msg)
+                # msg = (
+                #     "Empty MSA found; using single sequence mode."
+                # )
+                # click.echo(msg)
 
             if msa not in (0, -1):
                 is_msa_custom = True

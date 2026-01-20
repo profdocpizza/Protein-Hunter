@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 import torch
 import yaml
+import py2Dmol
+
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 from LigandMPNN.wrapper import LigandMPNNWrapper
@@ -17,7 +19,7 @@ from boltz_ph.constants import CHAIN_TO_NUMBER
 from utils.metrics import get_CA_and_sequence # Used implicitly in design.py
 from utils.convert import calculate_holo_apo_rmsd, convert_cif_files_to_pdb
 
-
+from boltz.data.write.pdb import to_pdb
 from model_utils import (
     binder_binds_contacts,
     clean_memory,
@@ -35,8 +37,19 @@ from model_utils import (
     smart_split,
 )
 
-# --- ipAE / ipSAE helpers
 
+def structure_to_pdb_string(structure, coords, plddts):
+    """
+    Convert a Boltz structure + coords + pLDDT array to a PDB string (no file I/O).
+    Mirrors the logic used in save_pdb() but returns a string instead of writing to disk.
+    """
+    # coords: torch.Tensor [1, N_atoms, 3]
+    coords_np = coords[0].detach().cpu().numpy()
+    structure.atoms["coords"] = coords_np[: structure.atoms["coords"].shape[0]]
+    return to_pdb(structure, plddts, boltz2=True)
+
+
+# --- ipAE / ipSAE helpers
 def extract_cb_coords(structure, coords):
 
     atom_coords = coords[0].detach().cpu().numpy()  # (N_atoms, 3)
@@ -80,10 +93,30 @@ def extract_cb_coords(structure, coords):
 
     return np.array(cb_list)
 
+def calculate_radius_of_gyration_binder(Cb_coords: np.ndarray, binder_len: int):
+
+
+    assert Cb_coords.ndim == 2 and Cb_coords.shape[1] == 3, \
+        "Cb_coords must be a [L, 3] coordinate array."
+
+    assert binder_len <= Cb_coords.shape[0], \
+        "binder_len longer than provided coordinate array."
+
+    # Slice binder Cβ coords
+    binder_coords = Cb_coords[:binder_len]
+
+    # Compute centroid
+    centroid = np.mean(binder_coords, axis=0)
+
+    # Compute squared distance from centroid
+    squared_dist = np.sum((binder_coords - centroid) ** 2, axis=1)
+
+    # Radius of gyration
+    return float(np.sqrt(np.mean(squared_dist)))
 
 
 
-def compute_best_target_ip_metrics(pae, coords, structure,
+def compute_best_target_ip_metrics(pae, Cb_coords,
                                    target_lengths, binder_len):
     """
     Corrected version: assumes chain ordering is:
@@ -107,8 +140,7 @@ def compute_best_target_ip_metrics(pae, coords, structure,
     pae_np = pae.detach().cpu().numpy()[0]
 
     # Extract CA coordinates (same code as your script)
-    cb = extract_cb_coords(structure, coords)
-    assert cb.shape[0] == (binder_len + sum(target_lengths))
+    assert Cb_coords.shape[0] == (binder_len + sum(target_lengths))
 
     # binder first in the chain order
     B = np.arange(0, binder_len)
@@ -121,7 +153,7 @@ def compute_best_target_ip_metrics(pae, coords, structure,
     offset = binder_len
 
     # Precompute distance matrix
-    diff = cb[:, None, :] - cb[None, :, :]
+    diff = Cb_coords[:, None, :] - Cb_coords[None, :, :]
     dist = np.linalg.norm(diff, axis=-1)
 
     for t_idx, L_T in enumerate(target_lengths):
@@ -587,7 +619,7 @@ class ProteinHunter_Boltz:
             update_binder_sequence(new_seq)
             clean_memory()
 
-        clean_memory() # <-- ADD THIS CALL HERE
+        clean_memory()
         # Capture Cycle 0 metrics
 
         # -------- Determine target_lengths and binder_len --------
@@ -624,14 +656,14 @@ class ProteinHunter_Boltz:
             cycle_0_iptm = float(np.mean(values) if values else 0.0)
         else:
             cycle_0_iptm = 0.0
-        
+        Cb_coords = extract_cb_coords(structure, output["coords"])
         cycle_0_ipae, cycle_0_ipsae_min = compute_best_target_ip_metrics(
             output["pae"],
-            output["coords"],
-            structure,
+            Cb_coords,
             target_lengths,
             binder_len,
         )
+
 
 
         run_metrics["cycle_0_iptm"] = cycle_0_iptm
@@ -660,8 +692,9 @@ class ProteinHunter_Boltz:
             model_type = (
                 "ligand_mpnn"
                 if (a.ligand_smiles or a.ligand_ccd or a.nucleic_seq)
-                else "soluble_mpnn"
+                else "protein_mpnn"
             )
+            print(f"MPNN model: {model_type}")
             design_kwargs = {
                 "pdb_file": pdb_filename,
                 "temperature": a.temperature,
@@ -713,10 +746,10 @@ class ProteinHunter_Boltz:
                 current_iptm = float(np.mean(values) if values else 0.0)
             else:
                 current_iptm = 0.0
+            Cb_coords=extract_cb_coords(structure, output["coords"])
             curr_ipae, curr_ipsae_min = compute_best_target_ip_metrics(
                 output["pae"],
-                output["coords"],
-                structure,
+                Cb_coords,
                 target_lengths,
                 binder_len,
             )
@@ -782,6 +815,7 @@ class ProteinHunter_Boltz:
             save_yaml_this_design = (alanine_percentage <= 0.20) and (
                 current_iptm > a.high_iptm_threshold
                 and curr_plddt > a.high_plddt_threshold
+                and curr_ipsae_min > a.high_ipsae_min_threshold
             )
 
             if save_yaml_this_design and a.contact_residues.strip():
@@ -888,6 +922,526 @@ class ProteinHunter_Boltz:
             plot_run_metrics(run_save_dir, a.name, run_id, a.num_cycles, run_metrics)
 
         return run_metrics
+    
+    
+    def _run_exploratory_design_cycle(
+        self,
+        data_cp,
+        run_id,
+        pocket_conditioning, 
+        pop_size=3, # number of MPNN seqeunces to create per generation
+        generations=10,
+        mpnn_temperature_start=0.3,
+        mpnn_temperature_end=0.01,
+        bias_hydrophobics_start = 2.0, # bias towards hydrophobics at start but later go to neutral
+    ):
+        """
+        IDEAS: increase population size towards the end as it gets much harder 
+        """
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+        import pandas as pd
+        sns.set(style="whitegrid", font_scale=1.2)
+
+        ###########################################################################
+        # DIRECTORY SETUP
+        ###########################################################################
+        a = self.args
+        run_save_dir = os.path.join(self.protein_hunter_save_dir, f"run_{run_id}")
+        os.makedirs(run_save_dir, exist_ok=True)
+
+        improved_dir = os.path.join(run_save_dir, "improved_structures")
+        os.makedirs(improved_dir, exist_ok=True)
+
+        ###########################################################################
+        # HELPERS
+        ###########################################################################
+        viewer = py2Dmol.view((600, 400), color="plddt")
+
+        def save_html():
+            """Overwrite a single viewer HTML file each generation."""
+            try:
+                html = viewer._display_viewer(static_data=viewer.objects)
+                html_path = os.path.join(
+                    run_save_dir, f"{a.name}_run_{run_id}_viewer.html"
+                )
+                with open(html_path, "w") as f:
+                    f.write(html)
+            except Exception as e:
+                print(f"Warning: failed to save viewer HTML: {e}")
+        def update_binder_sequence(new_seq):
+            for entry in data_cp["sequences"]:
+                if ("protein" in entry and
+                    self.binder_chain in entry["protein"]["id"]):
+                    entry["protein"]["sequence"] = new_seq
+                    return
+            raise ValueError("Binder chain not found in data_cp.")
+        def compute_fitness(iptm, ipae, ipsae_min, plddt, iplddt, fraction_alanine):
+            """
+            Unified fitness function used for both parent and candidates.
+            """
+            return (
+                -1 * ipae +
+                1 * iptm +
+                5 * ipsae_min +
+                1 * plddt +
+                1 * iplddt +
+                -1 * fraction_alanine
+            )
+
+        def predict_and_score(seq):
+            """
+            Runs Boltz prediction, extracts CPU-only metrics, no GPU retention.
+            Returns None on failure.
+            """
+            update_binder_sequence(seq)
+
+            output, structure = run_prediction(
+                data_cp,
+                binder_chain=self.binder_chain,
+                seq=seq,
+                boltz_model=self.boltz_model,
+                ccd_lib=self.ccd_lib,
+                ccd_path=self.ccd_path,
+                device=self.device,
+                pocket_conditioning=pocket_conditioning
+            )
+
+            pair_chains = output.get("pair_chains_iptm")
+            pae = output.get("pae")
+            coords = output.get("coords")
+
+            binder_len = len(seq)
+            target_lengths = [
+                len(x["protein"]["sequence"])
+                for x in data_cp["sequences"]
+                if "protein" in x and x["protein"]["id"][0] != self.binder_chain
+            ]
+
+            # ipTM
+            bidx = CHAIN_TO_NUMBER[self.binder_chain]
+            if len(pair_chains) > 1:
+                vals = [
+                    (
+                        pair_chains[bidx][i].detach().cpu().numpy() +
+                        pair_chains[i][bidx].detach().cpu().numpy()
+                    ) / 2.0
+                    for i in range(len(pair_chains))
+                    if i != bidx
+                ]
+                iptm = float(np.mean(vals))
+            else:
+                iptm = 0.0
+
+            # ipAE / ipSAE
+            Cb_coords=extract_cb_coords(structure, output["coords"])
+            ipae, ipsae_min = compute_best_target_ip_metrics(
+                pae, Cb_coords, target_lengths, binder_len
+            )
+            
+            plddt = float(output.get("complex_plddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
+            iplddt = float(output.get("complex_iplddt", torch.tensor([0.0])).detach().cpu().numpy()[0])
+
+            # Build pdb string
+            plddts_arr = output["plddt"].detach().cpu().numpy()[0]
+            pdb_str = structure_to_pdb_string(structure, coords, plddts_arr)
+
+            alanine = seq.count("A")
+            fraction_alanine = alanine / len(seq)
+            del output, structure, coords, pae, pair_chains, plddts_arr
+            clean_memory()
+            torch.cuda.empty_cache()
+
+            return {
+                "seq": seq,
+                "iptm": iptm,
+                "ipae": ipae,
+                "ipsae_min": ipsae_min,
+                "plddt": plddt,
+                "iplddt": iplddt,
+                "fraction_alanine": fraction_alanine,
+                "fitness": compute_fitness(iptm, ipae, ipsae_min, plddt, iplddt, fraction_alanine),
+                "pdb_str": pdb_str,
+                "rg": calculate_radius_of_gyration_binder(Cb_coords, binder_len)
+            }
+        import random
+
+        def sample_sequence(
+            length: int,
+            exclude_P: bool = True,
+            frac_X: float = 0.0,
+            sequence: str = "",
+            polar_to_X: bool = False
+        ) -> str:
+            """Sample a random amino-acid sequence with optional embedding of a given sequence.
+            If polar_to_X = True, convert polar residues to 'X' before enforcing frac_X."""
+            #TODO swap polar_to_X logic to surface_to_X
+            import random
+
+            # Allowed amino acids
+            aas = "ACDEFGHIKLMNQRSTVWY" + ("" if exclude_P else "P")
+
+            # Define polar residues (modifiable)
+            polar_residues = set("EK")
+
+            # --- Case 1: No provided sequence → simple mode ---
+            if sequence == "":
+                num_x = round(length * frac_X)
+                pool = aas if aas else "X"
+                seq_list = ["X"] * num_x + random.choices(pool, k=length - num_x)
+                random.shuffle(seq_list)
+
+                # Apply polar→X conversion if requested
+                if polar_to_X:
+                    seq_list = [
+                        "X" if aa in polar_residues else aa
+                        for aa in seq_list
+                    ]
+
+                return "".join(seq_list)
+
+            # --- Case 2: Provided sequence ---
+            # Truncate if necessary
+            if len(sequence) > length:
+                sequence = sequence[:length]
+
+            # Compute background length
+            bg_len = length - len(sequence)
+
+            # Generate background
+            pool = aas if aas else "X"
+            background = random.choices(pool, k=bg_len)
+
+            # Create initial sequence with random embedding position
+            embed_pos = random.randint(0, bg_len)
+            seq_list = (
+                background[:embed_pos]
+                + list(sequence)
+                + background[embed_pos:]
+            )
+
+            # ---- NEW STEP: optionally convert polar residues to X ----
+            if polar_to_X:
+                seq_list = [
+                    "X" if aa in polar_residues else aa
+                    for aa in seq_list
+                ]
+
+            # --- Enforce frac_X after polar conversion ---
+            target_num_x = round(length * frac_X)
+            current_num_x = seq_list.count("X")
+            num_to_add = max(0, target_num_x - current_num_x)
+
+            if num_to_add > 0:
+                candidates = [i for i, aa in enumerate(seq_list) if aa != "X"]
+                positions = random.sample(candidates, k=min(num_to_add, len(candidates)))
+                for p in positions:
+                    seq_list[p] = "X"
+
+            return "".join(seq_list)
+
+        import math
+        def equivalent_sphere_radius(n_residues, residue_volume=135):  
+            """
+            Estimate radius (in Å) of a sphere with volume equal to `n_residues` residues.
+            
+            Parameters:
+                n_residues (int): number of amino acids
+                residue_volume (float): average residue volume in Å^3 (default = 135 Å^3)
+            
+            Returns:
+                float: radius in Å
+            """
+            V = n_residues * residue_volume  # total volume in Å^3
+            R = (3 * V / (4 * math.pi)) ** (1/3)
+            return R
+        ###########################################################################
+        # INITIAL BACKBONE
+        ###########################################################################
+
+        if a.seq == "":
+            L = random.randint(a.min_protein_length, a.max_protein_length)
+        else:
+            L = len(a.seq)
+        while True:    
+            initial_seq = sample_sequence(L, exclude_P=a.exclude_P, frac_X=a.percent_X/100, sequence=a.seq, polar_to_X=False)
+
+            print(f"Initial Sequence: {initial_seq}")
+            update_binder_sequence(initial_seq)
+            parent_info = predict_and_score(initial_seq)
+            if parent_info["rg"] < equivalent_sphere_radius(L)*1.2:
+                break
+            else: 
+                print(f"Initial backbone radius of gyration {parent_info['rg']} is too large. Was aiming for {equivalent_sphere_radius(L)*1.2}, trying again...")
+
+        
+        backbone_path = os.path.join(improved_dir, f"structure_initial.pdb")
+        with open(backbone_path, "w") as f:
+            f.write(parent_info["pdb_str"])
+
+        # Add initial backbone to viewer
+        viewer.add_pdb(backbone_path)
+        save_html()
+
+        best_ipsae = parent_info["ipsae_min"]
+        best_fitness = parent_info["fitness"]
+        print(f"Initial Backbone: rg={parent_info['rg']:.2f}, ipTM={parent_info['iptm']:.2f}, ipSAE={parent_info['ipsae_min']:.2f}, fitness={parent_info['fitness']:.2f}")
+        
+        initial_scores = {
+            "iptm": parent_info["iptm"],
+            "ipsae_min": parent_info["ipsae_min"],
+            "plddt": parent_info["plddt"],
+            "iplddt": parent_info["iplddt"],
+            "fraction_alanine": parent_info["fraction_alanine"],
+            "fitness": parent_info["fitness"],
+            "rg": parent_info["rg"],
+        }
+
+        clean_memory()
+        torch.cuda.empty_cache()
+
+        best_overall = parent_info
+
+        ###########################################################################
+        # PLOTTING HISTORY
+        ###########################################################################
+        history = {
+            "iptm": [],
+            "ipsae_min": [],
+            "plddt": [],
+            "iplddt": [],
+            "fraction_alanine": [],
+            "fitness": [],
+            "used_as_backbone": [],   # replaces elite_mask
+            "rg": [],
+        }
+
+
+        ###########################################################################
+        # VIOLIN + SWARM PLOT 
+        ###########################################################################
+        def plot_history(history, gen, run_save_dir, name, run_id, 
+                        plot_initial_line=False, initial_scores=None):
+
+            metrics = [
+                ("iptm", "ipTM"),
+                ("ipsae_min", "ipSAE_min"),
+                ("iplddt", "ipLDDT"),
+                ("fraction_alanine", "Alanine Fraction"),
+                ("fitness", "Fitness"),
+                ("rg", "rg"),
+            ]
+
+            fig, axes = plt.subplots(3, 2, figsize=(14, 14))
+
+            for ax, (key, label) in zip(axes.flat, metrics):
+                values_per_gen = history[key][:gen]
+                usage_masks = history["used_as_backbone"][:gen]
+
+                # flatten data
+                all_vals, all_gens = [], []
+                for g_idx, vals in enumerate(values_per_gen):
+                    all_vals.extend(vals)
+                    all_gens.extend([g_idx] * len(vals))
+
+                df = pd.DataFrame({"Generation": all_gens, label: all_vals})
+
+                # violin background
+                sns.violinplot(
+                    data=df,
+                    x="Generation",
+                    y=label,
+                    ax=ax,
+                    inner=None,
+                    color="#CCCCCC",   # single consistent grey
+                    cut=0,
+                )
+
+
+
+                # swarm points (blue normally, red if used as backbone)
+                for g_idx, (vals, mask) in enumerate(zip(values_per_gen, usage_masks)):
+                    jitter = (np.random.rand(len(vals)) - 0.5) * 0.15
+                    for offset, yi, used_flag in zip(jitter, vals, mask):
+                        ax.scatter(
+                            g_idx + offset,
+                            yi,
+                            color=("red" if used_flag else "blue"),
+                            s=35,
+                            alpha=0.85,
+                            zorder=3,
+                        )
+
+                # dashed horizontal line for initial backbone score
+                if plot_initial_line and initial_scores is not None:
+                    ax.axhline(initial_scores[key], linestyle="--", color="black", alpha=0.6)
+
+                if key not in ["fraction_alanine", "fitness", "rg"]:
+                    ax.set_ylim(0, 1)
+
+                ax.set_xticks(range(gen))
+                ax.set_xticklabels([str(i + 1) for i in range(gen)])
+
+                ax.set_xlabel("Generation")
+                ax.set_ylabel(label)
+                ax.set_title(f"{label} across generations")
+                ax.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            outpath = os.path.join(run_save_dir, f"{name}_run_{run_id}_GA_progress.png")
+            plt.savefig(outpath, dpi=200)
+            plt.close(fig)
+
+        def interpolate_between(start, end, fraction_progress):
+            value = start + (end - start) * fraction_progress
+            # cap the value between start and end
+            return max(min(value, max(start, end)), min(start, end))
+
+
+        ###########################################################################
+        # MAINLOOP
+        ###########################################################################
+        for gen in range(1, generations + 1):
+            print(f"\n=============== GENERATION {gen}/{generations} ===============")
+            mpnn_temperature = round(interpolate_between(mpnn_temperature_start, mpnn_temperature_end, gen / generations),3)
+
+            bias_hydrophobics = float(interpolate_between(bias_hydrophobics_start, 0, gen / generations))
+            print(f"MPNN Temperature: {mpnn_temperature}")
+            # Generate sequence variants from MPNN (fresh every generation)
+            
+            if gen == 1: 
+                omit_AA=f"{a.omit_AA}"
+            else:
+                omit_AA=a.omit_AA
+
+            seq_list, _ = design_sequence(
+                self.designer,
+                "soluble_mpnn",
+                pdb_file=backbone_path,
+                temperature=mpnn_temperature,
+                chains_to_design=self.binder_chain,
+                omit_AA=omit_AA,
+                bias_AA=f"W:{bias_hydrophobics},Y:{bias_hydrophobics},F:{bias_hydrophobics}",
+                batch_size=pop_size if gen > 2 else 1,
+                seed=gen,
+            )
+            if isinstance(seq_list, str):
+                seq_list = [seq_list]
+
+            # Extract sequences only
+            population = [s.split(":")[0] for s in seq_list]
+            # drop duplicates
+            population = list(set(population))
+
+            # Filtering too-similar sequences 
+            def pid(a, b):
+                return sum(x == y for x, y in zip(a, b)) / len(a)
+
+            changed = True
+            max_id = 0.98
+            while changed:
+                changed = False
+                for i in range(len(population)):
+                    for j in range(i+1, len(population)):
+                        if pid(population[i], population[j]) > max_id:
+                            population.pop(j)       # remove one of the too-similar pair
+                            print(f"Removed a sequence due to high identity ({pid(population[i], population[j]):.3f}):")
+                            changed = True
+                            break
+                    if changed:
+                        break
+
+            # Score all candidates
+            scored = []
+            for i, seq in enumerate(population):
+                masked_seq = sample_sequence(L, exclude_P=a.exclude_P, frac_X=interpolate_between(a.percent_X/100,0,(generations-2+gen)/generations), sequence=seq, polar_to_X=False)
+                
+                r = predict_and_score(masked_seq)
+                r["index"] = i
+                if r:
+                    scored.append(r)
+                print(f"Population member {i+1}/{len(population)}: (ipsae_min {r['ipsae_min']:.3f}) seq: {masked_seq}")
+            if len(scored) == 0:
+                print("❌ All candidates failed. Stopping early.")
+                break
+
+
+            scored.sort(key=lambda d: d["fitness"], reverse=True)
+
+            # scored is already sorted high→low using fitness
+            best = scored[0]
+
+            # mark which candidates were used as backbone
+            # initially assume none were used this round
+            usage_mask = [False] * len(scored)
+
+            # backbone refresh check
+            used_as_backbone = False
+
+            # save best of the round
+            generation_dir= os.path.join(run_save_dir, f"gen_{gen}")
+            os.makedirs(generation_dir, exist_ok=True)
+            best_gen_pdb = os.path.join(generation_dir, f"{a.name}_run_{run_id}_gen_{gen}_best.pdb")
+            with open(best_gen_pdb, "w") as f:
+                f.write(best["pdb_str"])
+            viewer.add_pdb(best_gen_pdb)
+            save_html()
+            if best["fitness"] > best_fitness:
+                print(
+                    f" ⭐ Backbone improved: fitness {best_fitness:.3f} → {best['fitness']:.3f} "
+                    f"(ipsae_min {best_ipsae:.3f} → {best['ipsae_min']:.3f})"
+                )
+                best_fitness = best["fitness"]
+                best_ipsae = best["ipsae_min"]
+
+                used_as_backbone = True
+                new_back = os.path.join(improved_dir, f"{a.name}_run_{run_id}_gen_{gen}_best.pdb")
+                with open(new_back, "w") as f:
+                    f.write(best["pdb_str"])
+                backbone_path = new_back
+
+            # record which index was used for backbone
+            if used_as_backbone:
+                usage_mask[0] = True   # best was used
+
+            # save next-round data for plotting
+            history["iptm"].append([x["iptm"] for x in scored])
+            history["ipsae_min"].append([x["ipsae_min"] for x in scored])
+            history["plddt"].append([x["plddt"] for x in scored])
+            history["iplddt"].append([x["iplddt"] for x in scored])
+            history["fraction_alanine"].append([x["fraction_alanine"] for x in scored])
+            history["fitness"].append([x["fitness"] for x in scored])
+            history["rg"].append([x["rg"] for x in scored])
+            history["used_as_backbone"].append(usage_mask)
+
+
+            # update best overall
+            if best["fitness"] > best_overall["fitness"]:
+                best_overall = best
+
+
+            plot_history(history, gen, run_save_dir, a.name, run_id,
+                        plot_initial_line=True,
+                        initial_scores=initial_scores)
+
+
+
+        ###########################################################################
+        # SAVE BEST OVERALL
+        ###########################################################################
+        outpath = os.path.join(improved_dir, f"{a.name}_run_{run_id}_overall_best.pdb")
+        with open(outpath, "w") as f:
+            f.write(best_overall["pdb_str"])
+
+        return {
+            "run_id": run_id,
+            "best_seq": best_overall["seq"],
+            "best_ipae": best_overall["ipae"],
+            "best_ipsae_min": best_overall["ipsae_min"],
+            "best_iptm": best_overall["iptm"],
+            "best_plddt": best_overall["plddt"],
+        }
+
 
     def _save_summary_metrics(self, all_run_metrics):
         """Saves all run metrics to a single CSV file."""
@@ -900,7 +1454,7 @@ class ProteinHunter_Boltz:
                     f"cycle_{i}_iptm",
                     f"cycle_{i}_plddt",
                     f"cycle_{i}_iplddt",
-                    f"cycle_{i}_alanine",
+                    f"cycle_{i}_fraction_alanine",
                     f"cycle_{i}_seq",
                     f"cycle_{i}_ipae",
                     f"cycle_{i}_ipsae_min",
@@ -988,8 +1542,11 @@ class ProteinHunter_Boltz:
 
         
             data_cp = copy.deepcopy(base_data)
-
-            run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
+            if self.args.use_exploratory:
+                print("Using Genetic Algorithm")
+                run_metrics = self._run_exploratory_design_cycle(data_cp, run_id, pocket_conditioning)
+            else:
+                run_metrics = self._run_design_cycle(data_cp, run_id, pocket_conditioning)
             all_run_metrics.append(run_metrics)
 
         # 3. Save Summary
@@ -998,3 +1555,155 @@ class ProteinHunter_Boltz:
         # 4. Run Downstream Validation
         if self.args.use_alphafold3_validation:
             self._run_downstream_validation()
+
+def read_single_fasta(fpath):
+    """Read a FASTA file that contains exactly one sequence. Returns (name, seq)."""
+    name = None
+    seq_lines = []
+    with open(fpath) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if name is not None:
+                    raise ValueError(f"FASTA {fpath} contains multiple headers!")
+                name = line[1:].strip()
+            else:
+                seq_lines.append(line)
+
+    if name is None:
+        raise ValueError(f"FASTA {fpath} contains no header.")
+    if not seq_lines:
+        raise ValueError(f"FASTA {fpath} contains no sequence lines.")
+
+    seq = "".join(seq_lines)
+    return name, seq
+
+
+def run_single_design(args, binder_name, binder_seq):
+    """Runs a single binder design cleanly without mutating args.save_dir."""
+
+    binder_dir = os.path.join(args.save_dir, binder_name)
+    os.makedirs(binder_dir, exist_ok=True)
+
+    # Create a LOCAL args object to pass down
+    args_local = copy.deepcopy(args)
+    args_local.name = binder_name
+    args_local.seq = binder_seq
+    args_local.save_dir = binder_dir   # <-- only local modification
+
+    print(f"\n🔬 Running design for binder: {binder_name}")
+    pipeline = ProteinHunter_Boltz(args_local)
+    pipeline.run_pipeline()
+
+
+def run_multi_binder_mode(args):
+    """Handles --binder_dir logic, similar to run_refinement.py."""
+    fasta_files = [
+        f for f in os.listdir(args.binder_dir)
+        if f.endswith(".fasta")
+    ]
+    if not fasta_files:
+        raise ValueError(f"No .fasta files found in binder_dir: {args.binder_dir}")
+
+    for fasta in fasta_files:
+        fpath = os.path.join(args.binder_dir, fasta)
+        binder_name, binder_seq = read_single_fasta(fpath)
+        run_single_design(args, binder_name, binder_seq)
+
+
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser()
+
+    # === GENERAL INPUT ===
+    parser.add_argument("--name", default="design")
+    parser.add_argument("--seq", default="")
+    parser.add_argument("--protein_seqs", default="")
+    parser.add_argument("--msa_mode", default="mmseqs", choices=["mmseqs", "single"])
+    parser.add_argument("--save_dir", required=True)
+
+    # === DESIGN PARAMETERS ===
+    parser.add_argument("--num_designs", type=int, default=1)
+    parser.add_argument("--num_cycles", type=int, default=7)
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--omit_AA", default="")
+    parser.add_argument("--alanine_bias", action="store_true")
+    parser.add_argument("--alanine_bias_start", type=float, default=0.0)
+    parser.add_argument("--alanine_bias_end", type=float, default=0.0)
+
+    parser.add_argument("--exclude_P", action="store_true")
+    parser.add_argument("--percent_X", type=int, default=10)
+    parser.add_argument("--min_protein_length", type=int, default=140)
+    parser.add_argument("--max_protein_length", type=int, default=150)
+
+    parser.add_argument("--use_exploratory", action="store_true")
+
+    # === STRUCTURE MODEL (BOLTZ) ===
+    parser.add_argument("--boltz_model_path", default="~/.boltz/boltz2_conf.ckpt")
+    parser.add_argument("--boltz_model_version", default="boltz2")
+    parser.add_argument("--recycling_steps", type=int, default=0)
+    parser.add_argument("--diffuse_steps", type=int, default=200)
+    parser.add_argument("--grad_enabled", action="store_true")
+    parser.add_argument("--ccd_path", default="~/.boltz/mols")
+    parser.add_argument("--gpu_id", default="0")
+
+    # === HIGH-QUALITY FILTERING ===
+    parser.add_argument("--high_iptm_threshold", type=float, default=0.8)
+    parser.add_argument("--high_ipsae_min_threshold", type=float, default=0.6)
+    parser.add_argument("--high_plddt_threshold", type=float, default=0.8)
+
+    # === CONTACT FILTERING ===
+    parser.add_argument("--contact_residues", default="")
+    parser.add_argument("--no_contact_filter", action="store_true")
+    parser.add_argument("--contact_cutoff", type=float, default=5.0)
+    parser.add_argument("--max_contact_filter_retries", type=int, default=5)
+
+    # === LIGAND / NUCLEIC OPTIONS ===
+    parser.add_argument("--ligand_smiles", default=None)
+    parser.add_argument("--ligand_ccd", default=None)
+    parser.add_argument("--nucleic_seq", default=None)
+    parser.add_argument("--nucleic_type", default="dna")
+
+    # === TEMPLATE MODE ===
+    parser.add_argument("--template_path", default="")
+    parser.add_argument("--template_cif_chain_id", default="")
+
+    # === GENETIC ALGORITHM FLAGS ===
+    parser.add_argument("--randomly_kill_helix_feature", action="store_true")
+    parser.add_argument("--negative_helix_constant", type=float, default=0.0)
+    parser.add_argument("--logmd", action="store_true")
+
+    # === VALIDATION ===
+    parser.add_argument("--use_alphafold3_validation", action="store_true")
+    parser.add_argument("--use_msa_for_af3", action="store_true")
+    parser.add_argument("--alphafold_dir", default="~/alphafold3")
+    parser.add_argument("--af3_docker_name", default="alphafold3_yc")
+    parser.add_argument("--af3_database_settings", default="")
+    parser.add_argument("--hmmer_path", default="")
+    parser.add_argument("--work_dir", default="")
+    parser.add_argument("--plot", action="store_true")
+    
+    parser.add_argument("--mode", default="binder", choices=["binder", "unconditional"])
+    parser.add_argument("--binder_chain", default="A")
+    parser.add_argument("--initial_design_path", default="")
+    parser.add_argument("--cyclic", action="store_true")
+    parser.add_argument("--binder_length", type=int, default=0)
+
+    # === MULTI-BINDER SUPPORT (your addition) ===
+    parser.add_argument("--binder_dir", help="Directory of .fasta files for batch mode.")
+
+    args = parser.parse_args()
+
+    # MULTI-BINDER MODE
+    if args.binder_dir:
+        run_multi_binder_mode(args)
+
+    # SINGLE-BINDER MODE
+    else:
+        pipeline = ProteinHunter_Boltz(args)
+        pipeline.run_pipeline()
